@@ -1,0 +1,56 @@
+{
+  "expo": {
+    "name": "ErgoFocus",
+    "slug": "ergofocus",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "ergofocus",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "bundleIdentifier": "com.ergofocus.app",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSMicrophoneUsageDescription": "ErgoFocus usa el micrófono para medir el nivel de ruido de tu entorno."
+      }
+    },
+    "android": {
+      "package": "com.ergofocus.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ],
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#ffffff"
+        }
+      ],
+      "expo-audio",
+      "expo-font",
+      "expo-asset",
+      "expo-sqlite",
+      "expo-sharing"
+    ],
+    "extra": {
+      "EXPO_PUBLIC_SUPABASE_URL": "https://gudbqnqujyuxpnfvgpbh.supabase.co",
+      "EXPO_PUBLIC_SUPABASE_ANON_KEY": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imd1ZGJxbnF1anl1eHBuZnZncGJoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTEzOTQ5NzIsImV4cCI6MjEwNjk3MDk3Mn0.AC_cZ-KU3FadhsjrevHOCPpQGUtVr4cn1iC0Ao2dkUM",
+      "eas": {
+        "projectId": "5c793a31-5b87-4729-a8f3-5da3d12fe273"
+      }
+    },
+    "owner": "elsupa"
+  }
+}
