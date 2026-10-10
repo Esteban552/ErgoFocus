@@ -21,11 +21,13 @@ import {
 import { SensorState } from '../sensors/useSensors';
 import { Gradient } from './Gradient';
 import { formatDuration } from '../lib/format';
+import type { BackgroundMonitoring } from '../background/monitoring';
 
 interface Props {
   sensors: SensorState;
   decibels: number | null;
   onUpdateDecibels: (decibels: number | null) => void;
+  monitoring: BackgroundMonitoring;
 }
 
 const METERED_RECORDING_OPTIONS: RecordingOptions = {
@@ -33,7 +35,7 @@ const METERED_RECORDING_OPTIONS: RecordingOptions = {
   isMeteringEnabled: true,
 };
 
-export const AmbientTab: React.FC<Props> = ({ sensors, decibels, onUpdateDecibels }) => {
+export const AmbientTab: React.FC<Props> = ({ sensors, decibels, onUpdateDecibels, monitoring }) => {
   const audioRecorder = useAudioRecorder(METERED_RECORDING_OPTIONS, (status) => {
     if (status.hasError || status.mediaServicesDidReset) {
       setMicError(
@@ -144,6 +146,12 @@ export const AmbientTab: React.FC<Props> = ({ sensors, decibels, onUpdateDecibel
       setMicBusy(false);
     }
   };
+
+  useEffect(() => {
+    if (monitoring.enabled && (micActive || audioRecorder.isRecording)) {
+      void stopMicMeter();
+    }
+  }, [monitoring.enabled]);
 
   useEffect(() => {
     return () => {
@@ -303,8 +311,14 @@ export const AmbientTab: React.FC<Props> = ({ sensors, decibels, onUpdateDecibel
             </View>
 
             <View className="flex-row items-center justify-between gap-3 mt-3">
-              {statusBadge(micActive || micBusy)}
-              {micActive ? (
+              {statusBadge(monitoring.enabled || micActive || micBusy)}
+              {monitoring.enabled ? (
+                <View className="shrink-0 px-3 py-1.5 rounded-full bg-emerald-50">
+                  <Text className="text-xs font-sans-semibold text-emerald-700">
+                    Segundo plano activo
+                  </Text>
+                </View>
+              ) : micActive ? (
                 <Pressable
                   onPress={() => void stopMicMeter()}
                   disabled={micBusy}

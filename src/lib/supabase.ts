@@ -3,11 +3,23 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { AppState, Platform } from 'react-native';
 
+import Constants from 'expo-constants';
+
 import { Database } from '../types/database.types';
 
-const url = process.env.EXPO_PUBLIC_SUPABASE_URL?.trim();
-const publishableKey = process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY?.trim();
-const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY?.trim();
+// process.env vale en desarrollo (.env); en builds EAS/APK el .env no se incluye
+// (está en .gitignore), por eso se usa `extra` de app.json como respaldo.
+const extra = (Constants.expoConfig?.extra ?? {}) as Record<string, unknown>;
+const fromExtra = (name: string): string | undefined =>
+  typeof extra[name] === 'string' ? (extra[name] as string) : undefined;
+
+const url = (process.env.EXPO_PUBLIC_SUPABASE_URL || fromExtra('EXPO_PUBLIC_SUPABASE_URL'))?.trim();
+const publishableKey = (
+  process.env.EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY || fromExtra('EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY')
+)?.trim();
+const anonKey = (
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY || fromExtra('EXPO_PUBLIC_SUPABASE_ANON_KEY')
+)?.trim();
 const key = publishableKey || anonKey;
 
 function validateConfiguration(): string | null {

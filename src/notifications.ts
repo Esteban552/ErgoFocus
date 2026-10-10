@@ -1,8 +1,16 @@
 import { useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { isRunningInExpoGo } from 'expo';
+import Constants from 'expo-constants';
 import * as Notifications from 'expo-notifications';
 import { supabase } from './lib/supabase';
+
+function getProjectId(): string | undefined {
+  return (
+    Constants.expoConfig?.extra?.eas?.projectId ??
+    Constants.easConfig?.projectId
+  );
+}
 
 export function canUseRemotePushNotifications(): boolean {
   if (Platform.OS === 'web') return false;
@@ -27,9 +35,20 @@ async function ensureChannel(): Promise<void> {
   try {
     await Notifications.setNotificationChannelAsync(CHANNEL_ID, {
       name: 'Alertas ErgoFocus',
-      importance: Notifications.AndroidImportance.MAX,
+      importance: Notifications.AndroidImportance.HIGH,
       sound: 'default',
       vibrationPattern: [0, 250, 250, 250],
+      enableVibrate: true,
+      showBadge: true,
+    });
+    // Canal por defecto también con MAX importancia para push genérico
+    await Notifications.setNotificationChannelAsync('default', {
+      name: 'General ErgoFocus',
+      importance: Notifications.AndroidImportance.HIGH,
+      sound: 'default',
+      vibrationPattern: [0, 250, 250, 250],
+      enableVibrate: true,
+      showBadge: true,
     });
     channelReady = true;
   } catch {}
@@ -89,9 +108,9 @@ export async function scheduleLocalNotification(
   title: string,
   body: string,
   date: Date
-): Promise<void> {
+): Promise<boolean> {
   const granted = await ensureReady();
-  if (!granted) return;
+  if (!granted) return false;
   try {
     await Notifications.scheduleNotificationAsync({
       identifier: id,
@@ -102,8 +121,9 @@ export async function scheduleLocalNotification(
         date: date instanceof Date ? date : new Date(date),
       },
     });
+    return true;
   } catch {
-    // Sin permisos o en web: se ignora.
+    return false;
   }
 }
 
@@ -115,11 +135,34 @@ export async function cancelLocalNotification(id: string | null): Promise<void> 
   } catch {}
 }
 
+/** Agenda una notificación local que se repite cada `seconds` segundos (la gestiona el SO). */
+export async function scheduleRepeatingLocalNotification(
+  id: string,
+  title: string,
+  body: string,
+  seconds: number
+): Promise<void> {
+  const granted = await ensureReady();
+  if (!granted) return;
+  try {
+    await Notifications.cancelScheduledNotificationAsync(id).catch(() => {});
+    await Notifications.scheduleNotificationAsync({
+      identifier: id,
+      content: { title, body, sound: 'default' },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.TIME_INTERVAL,
+        channelId: Platform.OS === 'android' ? CHANNEL_ID : undefined,
+        seconds,
+        repeats: true,
+      },
+    });
+  } catch {}
+}
+
 /**
  * Envío exclusivamente remoto vía Edge Function `send-push` y Expo Push API.
  * No muestra notificación local: se usa como complemento de la programada.
  */
-const EAS_PROJECT_ID = '5c793a31-5b87-4729-a8f3-5da3d12fe273';
 let lastRegisteredToken: string | null = null;
 
 export async function sendRemotePushNotification(
@@ -131,36 +174,61 @@ export async function sendRemotePushNotification(
   try {
     if (!(await getNotificationPermission())) return;
 
-    const tokenData = await Notifications.getExpoPushTokenAsync({
-      projectId: EAS_PROJECT_ID,
-    });
+    const projectId = getProjectId();
+    const tokenData = await Notifications.getExpoPushTokenAsync(
+      projectId ? { projectId } : undefined
+    );
     if (!tokenData?.data) return;
     await supabase.functions.invoke('send-push', {
-      body: { user_id: userId, title, body, token: tokenData.data },
+      body: { user_id: userId, title, body, token: tokenData.data, channelId: CHANNEL_ID },
     });
   } catch {
     // Si el push falla, la notificación local programada ya garantiza el aviso.
   }
 }
 
-export async function registerForPushNotificationsAsync(userId: string | null): Promise<void> {
-  if (!canUseRemotePushNotifications()) return;
-  try {
-    if (!(await getNotificationPermission())) return;
+export type PushRegistrationResult =
+  | { ok: true }
+  | { ok: false; message: string };
 
-    const tokenData = await Notifications.getExpoPushTokenAsync({
-      projectId: EAS_PROJECT_ID,
-    });
+export async function registerForPushNotificationsAsync(
+  userId: string | null
+): Promise<PushRegistrationResult> {
+  if (!canUseRemotePushNotifications()) {
+    return { ok: false, message: 'Las notificaciones push remotas no están disponibles en este entorno.' };
+  }
+  try {
+    await ensureChannel();
+    if (!(await getNotificationPermission())) {
+      return { ok: false, message: 'Las notificaciones están desactivadas en el sistema.' };
+    }
+
+    const projectId = getProjectId();
+    if (!projectId) {
+      return { ok: false, message: 'Falta vincular la aplicación con un proyecto EAS.' };
+    }
+    const tokenData = await Notifications.getExpoPushTokenAsync(
+      { projectId }
+    );
     const token = tokenData?.data;
     if (userId && token && supabase) {
       lastRegisteredToken = token;
-      await supabase.from('push_tokens').upsert(
+      const { error } = await supabase.from('push_tokens').upsert(
         { user_id: userId, token },
         { onConflict: 'token' }
       );
+      if (error) throw error;
+      return { ok: true };
     }
-  } catch {
-    // Si falla la obtención del token, las alertas locales siguen funcionando.
+    return { ok: false, message: 'No se pudo registrar este dispositivo para push remoto.' };
+  } catch (error) {
+    return {
+      ok: false,
+      message:
+        error instanceof Error
+          ? `Push remoto no configurado: ${error.message}`
+          : 'No se pudo registrar este dispositivo para push remoto.',
+    };
   }
 }
 
@@ -168,12 +236,13 @@ export async function registerForPushNotificationsAsync(userId: string | null): 
 export async function unregisterPushTokenAsync(): Promise<void> {
   if (!supabase || !canUseRemotePushNotifications()) return;
   try {
+    const projectId = getProjectId();
     const token =
       lastRegisteredToken ??
       (
-        await Notifications.getExpoPushTokenAsync({
-          projectId: EAS_PROJECT_ID,
-        }).catch(() => null)
+        await Notifications.getExpoPushTokenAsync(
+          projectId ? { projectId } : undefined
+        ).catch(() => null)
       )?.data;
 
     if (token) {
@@ -189,33 +258,85 @@ interface HealthReadings {
   lux: number | null;
   luxAvailable: boolean;
   decibels: number | null;
-  sedentaryAlert: boolean;
+  sedentarySeconds: number;
+  enabled: boolean;
+  liveSensorAlertsEnabled: boolean;
+  nativeMonitoringRunning: boolean;
 }
 
 const TICK_MS = 30_000;
-const BREAK_INTERVAL_MS = 60 * 60 * 1000;
+const BREAK_INTERVAL_SECONDS = 60 * 60;
+const SEDENTARY_LIMIT_SECONDS = 60 * 60;
+const RESCHEDULE_THROTTLE_MS = 30_000;
+const SEDENTARY_ID = 'health-sedentary';
+const BREAK_ID = 'health-break';
 
 /**
- * Envía una notificación local cuando alguno de los sensores llega a su límite
- * recomendado: iluminación fuera de 300-500 lux, ruido >= 70 dB, sedenterismo
- * (1 h sin movimiento). También recuerda un descanso cada hora. Con histéresis
- * por borde para no repetir el aviso continuamente.
+ * Alertas de salud.
+ * - Iluminación y ruido: notificación inmediata al cruzar el límite (requiere la app activa,
+ *   porque dependen de lecturas en vivo).
+ * - Sedentarismo y descanso cada hora: se agendan en el SO como notificaciones locales, por lo
+ *   que llegan con la app en segundo plano o el teléfono bloqueado. El aviso de sedentarismo se
+ *   reprograma cada vez que se detecta movimiento.
  */
 export function useHealthAlerts(readings: HealthReadings): void {
   const ref = useRef({
     lightWarned: false,
     noiseWarned: false,
-    lastBreakAt: Date.now(),
-    sedentaryHandled: false,
+    lastSedentarySchedule: 0,
   });
 
   const readingsRef = useRef(readings);
   readingsRef.current = readings;
 
+  const { enabled, sedentarySeconds } = readings;
+  const { nativeMonitoringRunning } = readings;
+
+  // Recordatorio horario de descanso, repetido y gestionado por el SO.
+  useEffect(() => {
+    if (!enabled || nativeMonitoringRunning) {
+      void cancelLocalNotification(BREAK_ID);
+      void cancelLocalNotification(SEDENTARY_ID);
+      return;
+    }
+    void scheduleRepeatingLocalNotification(
+      BREAK_ID,
+      'Momento de descansar',
+      'Llevás una hora de trabajo. Hacé una pausa breve y movete.',
+      BREAK_INTERVAL_SECONDS
+    );
+  }, [enabled, nativeMonitoringRunning]);
+
+  // Aviso de sedentarismo: se agenda a (último movimiento + 1 h) y se corre con cada movimiento.
+  useEffect(() => {
+    if (!enabled || nativeMonitoringRunning) return;
+    const now = Date.now();
+    const neverScheduled = ref.current.lastSedentarySchedule === 0;
+    const justMoved = sedentarySeconds < 5;
+    if (!neverScheduled && !(justMoved && now - ref.current.lastSedentarySchedule > RESCHEDULE_THROTTLE_MS)) {
+      return;
+    }
+    ref.current.lastSedentarySchedule = now;
+    const remaining = Math.max(1, SEDENTARY_LIMIT_SECONDS - sedentarySeconds);
+    void scheduleLocalNotification(
+      SEDENTARY_ID,
+      'Sedentarismo detectado',
+      'Llevás una hora sin moverte. Levantate, estirá las piernas y descansá la vista.',
+      new Date(now + remaining * 1000)
+    );
+  }, [enabled, nativeMonitoringRunning, sedentarySeconds]);
+
   useEffect(() => {
     const interval = setInterval(() => {
       const acc = ref.current;
-      const { lux, luxAvailable, decibels, sedentaryAlert } = readingsRef.current;
+      const {
+        lux,
+        luxAvailable,
+        decibels,
+        enabled: on,
+        liveSensorAlertsEnabled,
+      } = readingsRef.current;
+      if (!on || !liveSensorAlertsEnabled) return;
 
       const lightBad = luxAvailable && lux !== null && (lux < 300 || lux > 500);
       if (lightBad && !acc.lightWarned) {
@@ -237,24 +358,6 @@ export function useHealthAlerts(readings: HealthReadings): void {
         );
       } else if (!noiseBad && acc.noiseWarned) {
         acc.noiseWarned = false;
-      }
-
-      if (Date.now() - acc.lastBreakAt >= BREAK_INTERVAL_MS) {
-        acc.lastBreakAt = Date.now();
-        void sendLocalNotification(
-          'Momento de descansar',
-          'Llevás una hora de trabajo. Hacé una pausa breve y movete.'
-        );
-      }
-
-      if (sedentaryAlert && !acc.sedentaryHandled) {
-        acc.sedentaryHandled = true;
-        void sendLocalNotification(
-          'Sedentarismo detectado',
-          'Llevás una hora sin moverte. Levantate, estirá las piernas y descansá la vista.'
-        );
-      } else if (!sedentaryAlert && acc.sedentaryHandled) {
-        acc.sedentaryHandled = false;
       }
     }, TICK_MS);
 

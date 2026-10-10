@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "564385437777",
+    "project_id": "examen-1e34b",
+    "storage_bucket": "examen-1e34b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:564385437777:android:fb1b3f7c45261c0faf8070",
+        "android_client_info": {
+          "package_name": "com.ergofocus.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDnze-z_raTeFsQmh4WtJ8a46wUkgg4bVw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

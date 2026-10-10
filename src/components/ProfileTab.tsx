@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { View, Text, Pressable, Alert, AppState, Linking } from 'react-native';
+import { View, Text, Pressable, Alert, AppState, Linking, Switch } from 'react-native';
 import {
   User,
   Crown,
@@ -10,13 +10,22 @@ import {
   Volume2,
   Rotate3d,
   Footprints,
+  Trash2,
 } from 'lucide-react-native';
 import { SensorId } from '../types';
 import { useAuth } from '../auth/AuthContext';
-import { getProfileRole, startCheckout, Role } from '../lib/billing';
-import { getSensorReadingsBetween, SensorReading } from '../db/repos';
+import {
+  cancelSubscriptionRenewal,
+  deleteAccount,
+  getSubscriptionInfo,
+  startCheckout,
+  SubscriptionInfo,
+  verifySubscription,
+} from '../lib/billing';
+import { deleteLocalUserData, getSensorReadingsBetween, SensorReading } from '../db/repos';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
+import type { BackgroundMonitoring } from '../background/monitoring';
 
 type PeriodId = 'day' | 'week' | 'month' | 'year';
 type BucketUnit = 'hour' | 'day' | 'month';
@@ -224,9 +233,12 @@ function buildPdfHtml(period: PeriodMeta, rows: ReportRow[], email: string): str
   `;
 }
 
-export const ProfileTab: React.FC = () => {
-  const { session, userId } = useAuth();
-  const [role, setRole] = useState<Role | null>(null);
+export const ProfileTab: React.FC<{
+  monitoring: BackgroundMonitoring;
+  notificationError: string | null;
+}> = ({ monitoring, notificationError }) => {
+  const { session, userId, signOut, isPro, refreshRole } = useAuth();
+  const [deleting, setDeleting] = useState(false);
   const [period, setPeriod] = useState<PeriodId>('week');
   const [rows, setRows] = useState<ReportRow[]>([]);
   const [loading, setLoading] = useState(false);
@@ -234,25 +246,25 @@ export const ProfileTab: React.FC = () => {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
+  const [subscriptionInfo, setSubscriptionInfo] = useState<SubscriptionInfo | null>(null);
+  const [cancellingSubscription, setCancellingSubscription] = useState(false);
 
-  const isPro = role === 'pro';
   const periodMeta = PERIODS.find((p) => p.id === period)!;
 
-  const refreshRole = useCallback(async () => {
-    const current = await getProfileRole(userId ?? null);
-    if (current) setRole(current);
+  const loadSubscriptionInfo = useCallback(async () => {
+    setSubscriptionInfo(await getSubscriptionInfo(userId));
   }, [userId]);
 
   useEffect(() => {
-    void refreshRole();
-  }, [refreshRole]);
-
-  useEffect(() => {
+    void loadSubscriptionInfo();
     const sub = AppState.addEventListener('change', (state) => {
-      if (state === 'active') void refreshRole();
+      if (state === 'active') {
+        void refreshRole();
+        void loadSubscriptionInfo();
+      }
     });
     return () => sub.remove();
-  }, [refreshRole]);
+  }, [loadSubscriptionInfo, refreshRole]);
 
   const loadData = useCallback(async () => {
     const activePeriod = PERIODS.find((p) => p.id === period)!;
@@ -311,19 +323,109 @@ export const ProfileTab: React.FC = () => {
     setCheckoutBusy(true);
     setCheckoutError(null);
     try {
-      const url = await startCheckout();
-      if (!url) {
-        setCheckoutError(
-          'No se pudo crear la sesión de pago. Asegurate de desplegar la Edge Function "checkout".'
-        );
+      const result = await startCheckout();
+      if (!result.ok) {
+        setCheckoutError(result.message);
         return;
       }
-      await Linking.openURL(url);
+      await Linking.openURL(result.url);
     } catch {
       setCheckoutError('No se pudo abrir el navegador de pago.');
     } finally {
       setCheckoutBusy(false);
     }
+  };
+
+  const handleVerify = async () => {
+    if (checkoutBusy) return;
+    setCheckoutBusy(true);
+    setCheckoutError(null);
+    try {
+      const res = await verifySubscription();
+      await refreshRole();
+      await loadSubscriptionInfo();
+      if (res.ok && res.role === 'pro') {
+        Alert.alert(
+          '¡Suscripción Pro Activa!',
+          'Se confirmó tu suscripción en Stripe. Ya tenés acceso completo a todas las funciones Pro.'
+        );
+      } else {
+        Alert.alert(
+          'Estado de suscripción',
+          res.message || 'No se detectó un pago completado reciente en Stripe.'
+        );
+      }
+    } catch {
+      setCheckoutError('No se pudo verificar la suscripción.');
+    } finally {
+      setCheckoutBusy(false);
+    }
+  };
+
+  const handleCancelSubscription = async () => {
+    if (cancellingSubscription) return;
+    setCancellingSubscription(true);
+    try {
+      const result = await cancelSubscriptionRenewal();
+      if (!result.ok) {
+        Alert.alert('No se pudo cancelar la renovación', result.message);
+        return;
+      }
+      await refreshRole();
+      await loadSubscriptionInfo();
+      const endDate = result.currentPeriodEnd
+        ? new Date(result.currentPeriodEnd).toLocaleDateString('es-AR', { dateStyle: 'long' })
+        : null;
+      Alert.alert(
+        'Renovación cancelada',
+        endDate
+          ? `Tu Plan Pro seguirá activo hasta el ${endDate}. No se realizará otro cobro.`
+          : 'Tu Plan Pro seguirá activo hasta finalizar el período que ya pagaste.'
+      );
+    } finally {
+      setCancellingSubscription(false);
+    }
+  };
+
+  const confirmCancelSubscription = () => {
+    Alert.alert(
+      'Cancelar renovación',
+      'No se realizará otro cobro. Vas a conservar todas las funciones Pro hasta que termine el período que ya pagaste.',
+      [
+        { text: 'Volver', style: 'cancel' },
+        {
+          text: 'Cancelar renovación',
+          style: 'destructive',
+          onPress: () => void handleCancelSubscription(),
+        },
+      ]
+    );
+  };
+
+  const handleDeleteAccount = async () => {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await deleteAccount();
+      if (userId) await deleteLocalUserData(userId);
+      await signOut();
+    } catch (error) {
+      console.warn(error);
+      Alert.alert('Error', 'No se pudo eliminar la cuenta. Intentá nuevamente.');
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  const confirmDeleteAccount = () => {
+    Alert.alert(
+      'Eliminar cuenta',
+      '¿Seguro que querés dar de baja tu cuenta? Tu perfil quedará desactivado y se cerrará tu sesión.',
+      [
+        { text: 'Cancelar', style: 'cancel' },
+        { text: 'Dar de baja', style: 'destructive', onPress: () => void handleDeleteAccount() },
+      ]
+    );
   };
 
   const hasRows = rows.length > 0;
@@ -356,6 +458,39 @@ export const ProfileTab: React.FC = () => {
           )}
         </View>
       </View>
+
+      {isPro && subscriptionInfo ? (
+        <View className="bg-white rounded-2xl p-5 border border-slate-200/80">
+          <View className="flex-row items-center gap-2 mb-2">
+            <Crown size={18} color="#f59e0b" />
+            <Text className="text-base font-sans-bold text-[#131b2e]">Suscripción Pro</Text>
+          </View>
+          <Text className="text-xs font-sans text-[#434655] leading-relaxed">
+            {subscriptionInfo.cancelAtPeriodEnd
+              ? subscriptionInfo.currentPeriodEnd
+                ? `Renovación cancelada. Conservás Pro hasta el ${new Date(
+                    subscriptionInfo.currentPeriodEnd
+                  ).toLocaleDateString('es-AR', { dateStyle: 'long' })}.`
+                : 'Renovación cancelada. Conservás Pro hasta el final del período pagado.'
+              : subscriptionInfo.currentPeriodEnd
+                ? `Próxima renovación: ${new Date(
+                    subscriptionInfo.currentPeriodEnd
+                  ).toLocaleDateString('es-AR', { dateStyle: 'long' })}.`
+                : 'Suscripción activa.'}
+          </Text>
+          {!subscriptionInfo.cancelAtPeriodEnd ? (
+            <Pressable
+              onPress={confirmCancelSubscription}
+              disabled={cancellingSubscription}
+              className="mt-4 py-2.5 items-center rounded-full border border-rose-200 bg-rose-50"
+            >
+              <Text className="text-xs font-sans-bold text-rose-700">
+                {cancellingSubscription ? 'Cancelando...' : 'Cancelar renovación'}
+              </Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
 
       {isPro ? (
         <>
@@ -514,8 +649,85 @@ export const ProfileTab: React.FC = () => {
               {checkoutBusy ? 'Abriendo pago...' : 'Mejorar a Pro'}
             </Text>
           </Pressable>
+
+          <Pressable
+            onPress={() => void handleVerify()}
+            disabled={checkoutBusy}
+            className="mt-3 py-2 items-center"
+          >
+            <Text className="text-xs font-sans-semibold text-[#2563eb]">
+              ¿Ya realizaste el pago? Toca acá para verificar tu suscripción
+            </Text>
+          </Pressable>
         </View>
       )}
+
+      {/* Monitoreo en segundo plano */}
+      {monitoring.supported && (
+        <View className="bg-white rounded-2xl p-6 border border-slate-200/80">
+          <View className="flex-row items-center justify-between gap-3">
+            <View className="flex-1">
+              <Text className="text-base font-sans-bold text-[#131b2e] mb-1">
+                Monitoreo en segundo plano
+              </Text>
+              <Text className="text-xs font-sans text-[#434655] leading-relaxed">
+                Usa un servicio nativo para intentar medir luz, ruido y movimiento con la pantalla
+                bloqueada. La disponibilidad depende del hardware; muestra una notificación
+                permanente y consume más batería.
+              </Text>
+            </View>
+            <Switch
+              value={monitoring.enabled}
+              disabled={monitoring.busy}
+              onValueChange={(value) => void monitoring.setEnabled(value)}
+            />
+          </View>
+          {monitoring.error && (
+            <Text className="text-xs font-sans text-rose-700 mt-3">{monitoring.error}</Text>
+          )}
+          {!monitoring.error && monitoring.enabled && (
+            <>
+              <Text className="text-xs font-sans-semibold text-emerald-700 mt-3">
+                Servicio activo · micrófono conectado
+              </Text>
+              {!monitoring.snapshot.movementWakeUp && (
+                <Text className="text-xs font-sans text-amber-800 mt-1">
+                  El acelerómetro no es de tipo wake-up; Android puede limitar sus lecturas en reposo profundo.
+                </Text>
+              )}
+            </>
+          )}
+        </View>
+      )}
+
+      {notificationError && (
+        <View className="bg-amber-50 rounded-2xl p-5 border border-amber-200">
+          <Text className="text-sm font-sans-bold text-amber-900 mb-1">
+            Push remoto no disponible
+          </Text>
+          <Text className="text-xs font-sans text-amber-800 leading-relaxed">
+            {notificationError} Los avisos locales del cronómetro siguen funcionando.
+          </Text>
+        </View>
+      )}
+
+      {/* Cuenta */}
+      <View className="bg-white rounded-2xl p-6 border border-slate-200/80">
+        <Text className="text-base font-sans-bold text-[#131b2e] mb-1">Mi cuenta</Text>
+        <Text className="text-xs font-sans text-[#434655] mb-4">
+          Al eliminar la cuenta se borran todos tus registros de la base de datos.
+        </Text>
+        <Pressable
+          onPress={confirmDeleteAccount}
+          disabled={deleting}
+          className="flex-row items-center justify-center gap-2 px-5 py-3 rounded-full border border-rose-200 bg-rose-50"
+        >
+          <Trash2 size={16} color="#dc2626" />
+          <Text className="text-sm font-sans-bold text-rose-700">
+            {deleting ? 'Eliminando...' : 'Eliminar cuenta y datos'}
+          </Text>
+        </Pressable>
+      </View>
     </View>
   );
 };

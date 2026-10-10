@@ -5,6 +5,15 @@
 > qué partes ya están listas para funcionar conectadas a Supabase y qué límite
 > tienen todavía las notificaciones push.
 
+> **Actualización 08/10/2026 (sesión posterior):** el usuario ficticio `dev-user-local-123` ya
+> fue eliminado (login real), el borrado de cuenta está en Perfil y existe monitoreo en segundo
+> plano. Detalle en `docs/CAMBIOS_SESION_2026-10-08.md`; ese archivo prevalece sobre las
+> secciones 4.3 y 5 de este documento.
+
+> **Actualización 09/10/2026:** se implementó el ciclo completo de la suscripción Pro, incluida la
+> cancelación de la renovación con acceso hasta el final del período pagado. El detalle actualizado
+> está en `docs/CORRECCIONES_IMPLEMENTADAS_2026-10-09.md` y prevalece sobre el estado anterior.
+
 ---
 
 ## 1. Resumen en 30 segundos
@@ -124,6 +133,7 @@ Cambios clave:
 | Pieza | Archivo / Lugar | Para qué sirve |
 |---|---|---|
 | Tabla `profiles` (rol free/pro) | `supabase/migrations/20261008000000_profiles_and_push.sql` | Guarda si el usuario es Free o Pro |
+| Ciclo de suscripción | `supabase/migrations/20261009165845_subscription_lifecycle.sql` | Guarda suscripción, estado, vencimiento y cancelación programada |
 | Tabla `push_tokens` | misma migración | Guarda el token del teléfono para push |
 | Edge Function `checkout` | `supabase/functions/checkout/` | Crea la sesión de pago de Stripe |
 | Edge Function `stripe-webhook` | `supabase/functions/stripe-webhook/` | Marca al usuario como Pro cuando paga |
@@ -139,9 +149,9 @@ Cambios clave:
 supabase db push
 
 # 2) Desplegar las funciones de servidor
-supabase functions deploy checkout --no-verify-jwt
+supabase functions deploy checkout
 supabase functions deploy stripe-webhook --no-verify-jwt
-supabase functions deploy send-push --no-verify-jwt
+supabase functions deploy send-push
 supabase functions deploy delete-account
 
 # 3) Configurar los secretos (claves de Stripe + URL de la app)
@@ -157,18 +167,21 @@ Y en el **panel de Stripe**:
 1. Crear el producto/suscripción **Pro** y copiar su `PRICE_ID`.
 2. Crear un **webhook** que apunte a:
    `https://<tu-proyecto>.supabase.co/functions/v1/stripe-webhook`
-3. Suscribirlo a los eventos `checkout.session.completed` y
+3. Suscribirlo a los eventos `checkout.session.completed`,
+   `customer.subscription.created`, `customer.subscription.updated` y
    `customer.subscription.deleted`.
 4. Copiar el "Signing secret" como `STRIPE_WEBHOOK_SECRET`.
+
+Sólo `stripe-webhook` se despliega con `--no-verify-jwt`, porque Stripe no envía un JWT de
+Supabase. `checkout`, `send-push` y `delete-account` deben conservar la verificación JWT.
 
 ### 4.3 Importante para que el pago funcione
 
 - La función `checkout` **exige un usuario autenticado de verdad** con
   Supabase (si no, responde "401 No autorizado").
-- La app en modo de desarrollo usa el usuario ficticio `dev-user-local-123`,
-  por lo que **el botón de pago no funcionará en desarrollo** hasta que se
-  use un login real (pantalla "Iniciar sesión") con una cuenta del proyecto
-  Supabase conectado.
+- La app usa login real de Supabase también en desarrollo; no existe un usuario ficticio.
+- Al cancelar, Stripe configura `cancel_at_period_end=true`: el usuario conserva Pro hasta
+  `subscription_current_period_end` y recién pasa a Free cuando termina el período pagado.
 
 ### 4.4 Dependencias nuevas instaladas
 

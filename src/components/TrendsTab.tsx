@@ -161,23 +161,36 @@ export const TrendsTab: React.FC = () => {
       </View>
 
       {/* Bar Chart */}
-      <View className="bg-white rounded-2xl p-6 border border-slate-200/80">
-        <View className="flex-row items-center justify-between pb-3 border-b border-slate-100 mb-6">
-          <View className="flex-row items-center gap-2">
-            <Icon size={16} color="#004ac6" />
-            <Text className="text-xs font-sans-semibold text-slate-500 uppercase tracking-wider">
-              Promedio Diario · {meta.label} ({meta.unit})
-            </Text>
-          </View>
-          {today !== null ? (
-            <View className="bg-[#f2f3ff] px-3 py-1 rounded-full">
-              <Text className="text-xs font-sans-bold text-[#004ac6]">
-                Hoy: {meta.format(today)}
+      <View className="bg-white rounded-2xl p-5 border border-slate-200/80">
+        <View className="pb-3 border-b border-slate-100 mb-6">
+          <Text className="text-[10px] font-sans-bold text-slate-400 uppercase tracking-wider mb-1.5">
+            PROMEDIO DIARIO
+          </Text>
+          <View className="flex-row items-center justify-between gap-3">
+            <View className="flex-row items-center gap-2 flex-1 min-w-0">
+              <View className="w-7 h-7 rounded-lg bg-[#eaedff] items-center justify-center shrink-0">
+                <Icon size={15} color="#004ac6" />
+              </View>
+              <Text
+                className="text-sm font-sans-bold text-[#131b2e] flex-1"
+                numberOfLines={1}
+                ellipsizeMode="tail"
+              >
+                {meta.label} <Text className="text-xs font-sans-medium text-slate-500">({meta.unit})</Text>
               </Text>
             </View>
-          ) : (
-            <Text className="text-xs font-sans-semibold text-slate-400">Sin datos hoy</Text>
-          )}
+            {today !== null ? (
+              <View className="bg-[#f2f3ff] px-3 py-1.5 rounded-full border border-[#2563eb]/20 shrink-0 self-center">
+                <Text className="text-xs font-sans-bold text-[#004ac6]">
+                  Hoy: {meta.format(today)}
+                </Text>
+              </View>
+            ) : (
+              <View className="bg-slate-100 px-2.5 py-1 rounded-full shrink-0 self-center">
+                <Text className="text-xs font-sans-medium text-slate-400">Sin datos hoy</Text>
+              </View>
+            )}
+          </View>
         </View>
 
         {loading ? (

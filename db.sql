@@ -12,6 +12,11 @@ create table if not exists public.profiles (
   user_id            uuid primary key references auth.users(id) on delete cascade,
   role               text not null default 'free' check (role in ('free', 'pro')),
   stripe_customer_id text,
+  stripe_subscription_id text,
+  subscription_status text,
+  subscription_current_period_end timestamptz,
+  subscription_cancel_at_period_end boolean not null default false,
+  deleted_at         timestamptz default null,
   updated_at         timestamptz not null default now()
 );
 
@@ -41,6 +46,12 @@ create index if not exists idx_push_tokens_user_id on public.push_tokens (user_i
 create index if not exists idx_profiles_stripe_customer_id
   on public.profiles (stripe_customer_id)
   where stripe_customer_id is not null;
+create unique index if not exists idx_profiles_stripe_subscription_id
+  on public.profiles (stripe_subscription_id)
+  where stripe_subscription_id is not null;
+create index if not exists idx_profiles_deleted_at
+  on public.profiles (deleted_at)
+  where deleted_at is null;
 create index if not exists idx_sensor_daily_user_day
   on public.sensor_daily (user_id, day desc);
 
@@ -77,11 +88,11 @@ alter table public.profiles    enable row level security;
 alter table public.push_tokens enable row level security;
 alter table public.sensor_daily enable row level security;
 
--- Profiles: users can only read their own row.
+-- Profiles: users can only read their own row (if not soft-deleted).
 drop policy if exists "profiles: leer el propio perfil" on public.profiles;
 create policy "profiles: leer el propio perfil"
   on public.profiles for select
-  using ((select auth.uid()) = user_id);
+  using ((select auth.uid()) = user_id and deleted_at is null);
 
 -- Push tokens: users manage only their own tokens.
 drop policy if exists "push_tokens: leer los propios tokens" on public.push_tokens;
@@ -109,7 +120,13 @@ create policy "push_tokens: borrar los propios tokens"
 drop policy if exists "sensor_daily: leer los propios datos" on public.sensor_daily;
 create policy "sensor_daily: leer los propios datos"
   on public.sensor_daily for select
-  using ((select auth.uid()) = user_id);
+  using (
+    (select auth.uid()) = user_id
+    and not exists (
+      select 1 from public.profiles p
+      where p.user_id = (select auth.uid()) and p.deleted_at is not null
+    )
+  );
 
 drop policy if exists "sensor_daily: crear datos (solo Pro)" on public.sensor_daily;
 create policy "sensor_daily: crear datos (solo Pro)"
@@ -118,7 +135,7 @@ create policy "sensor_daily: crear datos (solo Pro)"
     (select auth.uid()) = user_id
     and exists (
       select 1 from public.profiles p
-      where p.user_id = (select auth.uid()) and p.role = 'pro'
+      where p.user_id = (select auth.uid()) and p.role = 'pro' and p.deleted_at is null
     )
   );
 
@@ -130,7 +147,7 @@ create policy "sensor_daily: actualizar datos (solo Pro)"
     (select auth.uid()) = user_id
     and exists (
       select 1 from public.profiles p
-      where p.user_id = (select auth.uid()) and p.role = 'pro'
+      where p.user_id = (select auth.uid()) and p.role = 'pro' and p.deleted_at is null
     )
   );
 

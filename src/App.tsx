@@ -4,7 +4,7 @@
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { View, ScrollView, Text } from 'react-native';
+import { Alert, View, ScrollView } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import {
@@ -28,6 +28,7 @@ import { LoginScreen } from './screens/LoginScreen';
 import { useSensors } from './sensors/useSensors';
 import { useHealthAlerts, configureNotifications, registerForPushNotificationsAsync } from './notifications';
 import { logSensor, syncSensorDailyToSupabase } from './db/repos';
+import { useBackgroundMonitoring } from './background/monitoring';
 
 const FLUSH_INTERVAL_MS = 5 * 60 * 1000;
 
@@ -55,22 +56,30 @@ export default function App() {
 }
 
 function MainApp() {
-  const { initializing, signOut } = useAuth();
-  const userId = "dev-user-local-123";
+  const { initializing, userId, isPro, signOut } = useAuth();
 
   const [currentTab, setCurrentTab] = useState<TabType>('dashboard');
+  const [notificationError, setNotificationError] = useState<string | null>(null);
 
   // Ambient state (noise comes from the microphone meter, managed in AmbientTab)
   const [decibels, setDecibels] = useState<number | null>(null);
 
   // Real-time sensor readings (light, acceleration, gyroscope)
   const sensors = useSensors();
+  const monitoring = useBackgroundMonitoring(userId);
+  const effectiveDecibels =
+    monitoring.enabled && monitoring.snapshot.decibels !== null
+      ? monitoring.snapshot.decibels
+      : decibels;
 
   useHealthAlerts({
     lux: sensors.lux,
     luxAvailable: sensors.luxAvailable,
-    decibels,
-    sedentaryAlert: sensors.sedentaryAlert,
+    decibels: effectiveDecibels,
+    sedentarySeconds: sensors.sedentarySeconds,
+    enabled: Boolean(userId),
+    liveSensorAlertsEnabled: !monitoring.enabled,
+    nativeMonitoringRunning: monitoring.enabled && monitoring.snapshot.running,
   });
 
   const sensorsRef = useRef(sensors);
@@ -80,14 +89,16 @@ function MainApp() {
 
   useEffect(() => {
     void configureNotifications();
-    void registerForPushNotificationsAsync(userId);
-    if (userId) {
-      void syncSensorDailyToSupabase(userId, 7);
-    }
-  }, [userId]);
+    if (!userId) return;
+    void registerForPushNotificationsAsync(userId).then((result) => {
+      setNotificationError(result.ok ? null : result.message);
+    });
+    if (isPro) void syncSensorDailyToSupabase(userId, 7);
+  }, [isPro, userId]);
 
   // Periodic persistence of the latest readings per linked user
   useEffect(() => {
+    if (!userId) return;
     const flush = () => {
       const s = sensorsRef.current;
       const samples: { sensor: SensorId; value: number }[] = [];
@@ -102,14 +113,14 @@ function MainApp() {
           console.warn('No se pudo guardar el log del sensor:', error)
         );
       }
-      if (userId) {
+      if (userId && isPro) {
         void syncSensorDailyToSupabase(userId, 7);
       }
     };
     const interval = setInterval(flush, FLUSH_INTERVAL_MS);
     flush();
     return () => clearInterval(interval);
-  }, [userId]);
+  }, [isPro, userId]);
 
   const handleUpdateDecibels = useCallback((value: number | null) => {
     setDecibels(value);
@@ -127,7 +138,12 @@ function MainApp() {
     );
   }
 
-  const noiseStatus = decibels === null ? 'sin-medicion' as const : decibels < 50 ? 'silencioso' as const : decibels < 70 ? 'moderado' as const : 'ruidoso' as const;
+  const noiseStatus = effectiveDecibels === null ? 'sin-medicion' as const : effectiveDecibels < 50 ? 'silencioso' as const : effectiveDecibels < 70 ? 'moderado' as const : 'ruidoso' as const;
+
+  const handleSignOut = async () => {
+    const result = await signOut();
+    if (!result.ok) Alert.alert('No se pudo cerrar la sesión', result.message);
+  };
 
   return (
     <View className="flex-1 bg-[#faf8ff]">
@@ -135,7 +151,7 @@ function MainApp() {
 
       {/* Top Navigation Bar */}
       <SafeAreaView edges={['top']} style={{ backgroundColor: '#ffffff' }}>
-        <TopBar onSignOut={() => void signOut()} />
+        <TopBar onSignOut={() => void handleSignOut()} />
       </SafeAreaView>
 
       {/* Main Container */}
@@ -150,23 +166,27 @@ function MainApp() {
         {currentTab === 'dashboard' && (
           <DashboardTab
             sensors={sensors}
-            decibels={decibels}
+            decibels={effectiveDecibels}
             noiseStatus={noiseStatus}
             onNavigateToAmbient={() => setCurrentTab('ambient')}
           />
         )}
 
-        {currentTab === 'ambient' && (
+        {/* Siempre montado (oculto fuera de su pestaña) para que el medidor de micrófono no se corte. */}
+        <View style={{ display: currentTab === 'ambient' ? 'flex' : 'none' }}>
           <AmbientTab
             sensors={sensors}
-            decibels={decibels}
+            decibels={effectiveDecibels}
             onUpdateDecibels={handleUpdateDecibels}
+            monitoring={monitoring}
           />
-        )}
+        </View>
 
         {currentTab === 'trends' && <TrendsTab />}
 
-        {currentTab === 'profile' && <ProfileTab />}
+        {currentTab === 'profile' && (
+          <ProfileTab monitoring={monitoring} notificationError={notificationError} />
+        )}
       </ScrollView>
 
       {/* Bottom Floating Navigation */}

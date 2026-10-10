@@ -60,11 +60,16 @@ Deno.serve(async (req) => {
     );
   }
 
+  const pushChannel = bodyData.channelId || 'ergofocus-alerts';
+
   const messages = tokensToUse.map((t) => ({
     to: t,
     title,
     body,
     sound: 'default',
+    channelId: pushChannel,
+    priority: 'high',
+    _displayInForeground: true,
   }));
 
   const response = await fetch(EXPO_PUSH_URL, {

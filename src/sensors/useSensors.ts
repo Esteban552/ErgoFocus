@@ -5,11 +5,13 @@ const SEDENTARY_ALERT_MINUTES = 60;
 const MANIPULATION_THRESHOLD = 1.2; // rad/s por encima del cual se considera que el teléfono se tomó/manipuló
 const VIBRATION_DELTA = 0.5; // diferencia mínima (rad/s) en la ventana para detectar vibración de mesa
 const ROTATION_WINDOW = 8; // ~1.6s a 200ms por muestra
-const BASELINE_COLLECTION_SAMPLES = 10; // muestras iniciales (~5s) para calibrar la gravedad en reposo
-const MOVEMENT_DEVIATION = 0.6; // m/s² sobre la línea base calibrada para considerar movimiento
+const BASELINE_COLLECTION_SAMPLES = 10; // muestras iniciales para calibrar la gravedad en reposo
+const MOVEMENT_DEVIATION = 0.05; // g sobre la línea base calibrada (expo-sensors entrega valores en g, no en m/s²)
+const MOVEMENT_JERK = 0.04; // g de cambio entre muestras consecutivas para considerar movimiento
 const MOVEMENT_DEBOUNCE = 2; // muestras consecutivas para confirmar cambio de estado (evita picos)
-const REST_CALIBRATION_SAMPLES = 30; // muestras estables (~15s) para recalibrar la línea base
+const REST_CALIBRATION_SAMPLES = 25; // muestras estables para recalibrar la línea base
 const BASELINE_ADAPTATION = 0.05; // cuánto se acerca la línea base al valor actual al recalibrar
+const ACCEL_INTERVAL_MS = 200;
 
 function median(values: number[]): number {
   const sorted = [...values].sort((a, b) => a - b);
@@ -90,13 +92,14 @@ export function useSensors(): SensorState {
     let above = 0;
     let below = 0;
     let moving = false;
+    let previous: number | null = null;
 
     async function init() {
       try {
         const available = await Accelerometer.isAvailableAsync();
         if (!mounted || !available) return;
         setMovementAvailable(true);
-        Accelerometer.setUpdateInterval(500);
+        Accelerometer.setUpdateInterval(ACCEL_INTERVAL_MS);
         subscription = Accelerometer.addListener((data) => {
           const { x, y, z } = data as { x: number; y: number; z: number };
           const magnitude = Math.sqrt(x * x + y * y + z * z);
@@ -113,12 +116,19 @@ export function useSensors(): SensorState {
           }
 
           const dev = Math.abs(magnitude - baseline);
-          if (dev > MOVEMENT_DEVIATION) {
+          const jerk = previous === null ? 0 : Math.abs(magnitude - previous);
+          previous = magnitude;
+          if (dev > MOVEMENT_DEVIATION || jerk > MOVEMENT_JERK) {
             above += 1;
             below = 0;
           } else {
             below += 1;
             above = 0;
+          }
+
+          // Mientras haya movimiento sostenido se reinicia el contador de sedentarismo.
+          if (above >= MOVEMENT_DEBOUNCE) {
+            lastMovementRef.current = Date.now();
           }
 
           // Debounce: solo cambia de estado tras varias muestras consecutivas del mismo signo.

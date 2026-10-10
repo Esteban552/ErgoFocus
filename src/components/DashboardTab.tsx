@@ -1,12 +1,12 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, Linking, AppState, Alert, TextInput } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Play,
   Pause,
   RotateCcw,
   ArrowUpRight,
   Crown,
-  Trash2,
   CheckCircle2,
   Sun,
   Volume2,
@@ -21,16 +21,29 @@ import {
   cancelLocalNotification,
   scheduleLocalNotification,
   sendLocalNotification,
-  sendRemotePushNotification,
   getNotificationPermission,
 } from '../notifications';
-import { getProfileRole, startCheckout, deleteAccount, Role } from '../lib/billing';
-import { deleteLocalUserData } from '../db/repos';
+import { startCheckout, verifySubscription } from '../lib/billing';
 import { formatDuration } from '../lib/format';
+import {
+  canScheduleExactAlarms,
+  openExactAlarmSettings,
+} from '../background/monitoring';
 
 const DURATION_PRESETS = [15, 25, 45, 60];
 const MIN_DURATION_MIN = 1;
 const MAX_DURATION_MIN = 240;
+const FOCUS_STORAGE_KEY_PREFIX = 'ergofocus:focus-session';
+
+interface PersistedFocusSession {
+  active: boolean;
+  endAt: number | null;
+  remainingMs: number;
+  focusMinutes: number;
+  distractions: number;
+  blockMinutes: number;
+  notificationId: string | null;
+}
 
 export type NoiseStatus = 'sin-medicion' | 'silencioso' | 'moderado' | 'ruidoso';
 
@@ -42,11 +55,9 @@ interface Props {
 }
 
 export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, onNavigateToAmbient }) => {
-  const { session, userId, signOut } = useAuth();
-  const [role, setRole] = useState<Role | null>(null);
+  const { session, userId, role, isPro, refreshRole } = useAuth();
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [checkoutError, setCheckoutError] = useState<string | null>(null);
-  const [deleting, setDeleting] = useState(false);
 
   const [remainingMs, setRemainingMs] = useState(25 * 60 * 1000);
   const [active, setActive] = useState(false);
@@ -55,20 +66,14 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
   const [distractions, setDistractions] = useState(0);
   const [focusMinutes, setFocusMinutes] = useState(25);
   const [durationText, setDurationText] = useState('25');
+  const [focusBusy, setFocusBusy] = useState(false);
   const endedRef = useRef<number | null>(null);
   const blockMinutesRef = useRef(25);
   const lastPresetRef = useRef(25);
   const scheduledNotificationIdRef = useRef<string | null>(null);
   const manipulationHandledRef = useRef(false);
-
-  const refreshRole = useCallback(async () => {
-    const current = await getProfileRole(userId ?? null);
-    if (current) setRole(current);
-  }, [userId]);
-
-  useEffect(() => {
-    void refreshRole();
-  }, [refreshRole]);
+  const focusActionRef = useRef(0);
+  const focusStorageKey = userId ? `${FOCUS_STORAGE_KEY_PREFIX}:${userId}` : null;
 
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
@@ -81,6 +86,43 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
     const timer = setInterval(() => setClockNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    if (!focusStorageKey) return;
+    let cancelled = false;
+    void AsyncStorage.getItem(focusStorageKey)
+      .then((raw) => {
+        if (cancelled || !raw) return;
+        const saved = JSON.parse(raw) as Partial<PersistedFocusSession>;
+        const savedMinutes = Math.min(
+          MAX_DURATION_MIN,
+          Math.max(MIN_DURATION_MIN, Number(saved.focusMinutes) || 25)
+        );
+        setFocusMinutes(savedMinutes);
+        setDurationText(String(savedMinutes));
+        setDistractions(Math.max(0, Number(saved.distractions) || 0));
+        blockMinutesRef.current = Math.max(1, Number(saved.blockMinutes) || savedMinutes);
+        scheduledNotificationIdRef.current = saved.notificationId ?? null;
+
+        if (saved.active && typeof saved.endAt === 'number' && saved.endAt > Date.now()) {
+          setEndAt(saved.endAt);
+          setRemainingMs(saved.endAt - Date.now());
+          setActive(true);
+          setClockNow(Date.now());
+        } else {
+          setEndAt(null);
+          const expired = saved.active && typeof saved.endAt === 'number';
+          setRemainingMs(expired ? 0 : Math.max(0, Number(saved.remainingMs) || savedMinutes * 60_000));
+          setActive(false);
+          if (expired) void AsyncStorage.removeItem(focusStorageKey);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [focusStorageKey]);
 
   const isActive = active && endAt !== null;
   const displayRemaining = isActive ? Math.max(0, endAt! - clockNow) : remainingMs;
@@ -99,14 +141,9 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
       void cancelLocalNotification(scheduledNotificationIdRef.current);
       scheduledNotificationIdRef.current = null;
     }
-    // La local programada ya se mostró por el SO; acá solo se complementa con el push remoto.
-    void sendRemotePushNotification(
-      userId,
-      'Sesión de enfoque completada',
-      `Terminaste tu bloque de ${blockMinutesRef.current} minutos. Levantate, movete y descansá la vista.`
-    );
     soundService.playSuccessChime();
-  }, [clockNow, endAt, isActive, userId, focusMinutes]);
+    if (focusStorageKey) void AsyncStorage.removeItem(focusStorageKey);
+  }, [clockNow, endAt, focusStorageKey, isActive]);
 
   // Distracción del Modo Enfoque: si el giroscopio detecta que tomás el celular
   // durante una sesión activa, se cuenta una distracción (se muestra como texto).
@@ -127,8 +164,9 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
     }
   }, [isActive, sensors.manipulated]);
 
-  const toggleFocus = () => {
+  const toggleFocus = async () => {
     if (isActive) {
+      focusActionRef.current += 1;
       const left = Math.max(0, endAt! - Date.now());
       setRemainingMs(left);
       setActive(false);
@@ -137,18 +175,30 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
         void cancelLocalNotification(scheduledNotificationIdRef.current);
         scheduledNotificationIdRef.current = null;
       }
+      if (focusStorageKey) {
+        const paused: PersistedFocusSession = {
+          active: false,
+          endAt: null,
+          remainingMs: left,
+          focusMinutes,
+          distractions,
+          blockMinutes: blockMinutesRef.current,
+          notificationId: null,
+        };
+        await AsyncStorage.setItem(focusStorageKey, JSON.stringify(paused));
+      }
       return;
     }
+    if (focusBusy) return;
+
     const base = remainingMs > 0 ? remainingMs : focusMinutes * 60 * 1000;
-    blockMinutesRef.current = Math.max(1, Math.round(base / 60_000));
-    endedRef.current = null;
-    setDistractions(0);
-    setEndAt(Date.now() + base);
-    setRemainingMs(base);
-    setActive(true);
-    // Se verifica el permiso: si no está concedido, no llegan notificaciones.
-    void (async () => {
+    const blockMinutes = Math.max(1, Math.round(base / 60_000));
+    const deadline = Date.now() + base;
+    const action = ++focusActionRef.current;
+    setFocusBusy(true);
+    try {
       const granted = await getNotificationPermission();
+      if (action !== focusActionRef.current) return;
       if (!granted) {
         Alert.alert(
           'Notificaciones desactivadas',
@@ -156,20 +206,65 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
         );
         return;
       }
-      // La local programada la dispara el SO exactamente al terminar el bloque,
-      // aunque la app esté en segundo plano o cerrada.
+      const exact = await canScheduleExactAlarms();
+      if (action !== focusActionRef.current) return;
+      if (!exact) {
+        Alert.alert(
+          'Avisos puntuales desactivados',
+          'Android puede demorar el aviso del fin del bloque. Permití alarmas exactas para recibirlo a horario.',
+          [
+            { text: 'Ahora no', style: 'cancel' },
+            {
+              text: 'Abrir ajustes',
+              onPress: () => void openExactAlarmSettings(),
+            },
+          ]
+        );
+      }
       const scheduledId = `focus-${Date.now()}`;
-      scheduledNotificationIdRef.current = scheduledId;
-      void scheduleLocalNotification(
+      const scheduled = await scheduleLocalNotification(
         scheduledId,
         'Sesión de enfoque completada',
-        `Terminaste tu bloque de ${blockMinutesRef.current} minutos. Levantate, movete y descansá la vista.`,
-        new Date(Date.now() + base)
+        `Terminaste tu bloque de ${blockMinutes} minutos. Levantate, movete y descansá la vista.`,
+        new Date(deadline)
       );
-    })();
+      if (action !== focusActionRef.current) {
+        if (scheduled) await cancelLocalNotification(scheduledId);
+        return;
+      }
+      if (!scheduled) {
+        Alert.alert(
+          'No se pudo iniciar el bloque',
+          'No fue posible programar el aviso de finalización. Revisá los permisos e intentá nuevamente.'
+        );
+        return;
+      }
+
+      blockMinutesRef.current = blockMinutes;
+      scheduledNotificationIdRef.current = scheduledId;
+      endedRef.current = null;
+      setDistractions(0);
+      setEndAt(deadline);
+      setRemainingMs(base);
+      setActive(true);
+      const state: PersistedFocusSession = {
+        active: true,
+        endAt: deadline,
+        remainingMs: base,
+        focusMinutes,
+        distractions: 0,
+        blockMinutes,
+        notificationId: scheduledId,
+      };
+      if (focusStorageKey) await AsyncStorage.setItem(focusStorageKey, JSON.stringify(state));
+    } finally {
+      if (action === focusActionRef.current) setFocusBusy(false);
+    }
   };
 
   const resetFocus = () => {
+    focusActionRef.current += 1;
+    setFocusBusy(false);
     setActive(false);
     setEndAt(null);
     setDistractions(0);
@@ -178,6 +273,7 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
       void cancelLocalNotification(scheduledNotificationIdRef.current);
       scheduledNotificationIdRef.current = null;
     }
+    if (focusStorageKey) void AsyncStorage.removeItem(focusStorageKey);
   };
 
   const applyDuration = (minutes: number) => {
@@ -185,7 +281,10 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
     setFocusMinutes(clamped);
     setDurationText(String(clamped));
     if (DURATION_PRESETS.includes(clamped)) lastPresetRef.current = clamped;
-    if (!isActive) setRemainingMs(clamped * 60 * 1000);
+    if (!isActive) {
+      setRemainingMs(clamped * 60 * 1000);
+      if (focusStorageKey) void AsyncStorage.removeItem(focusStorageKey);
+    }
   };
 
   const handleDurationText = (text: string) => {
@@ -194,7 +293,10 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
     if (cleaned === '') return;
     const clamped = Math.min(MAX_DURATION_MIN, Math.max(MIN_DURATION_MIN, parseInt(cleaned, 10)));
     setFocusMinutes(clamped);
-    if (!isActive) setRemainingMs(clamped * 60 * 1000);
+    if (!isActive) {
+      setRemainingMs(clamped * 60 * 1000);
+      if (focusStorageKey) void AsyncStorage.removeItem(focusStorageKey);
+    }
   };
 
   const handleDurationBlur = () => {
@@ -213,14 +315,12 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
     setCheckoutBusy(true);
     setCheckoutError(null);
     try {
-      const url = await startCheckout();
-      if (!url) {
-        setCheckoutError(
-          'No se pudo crear la sesión de pago. Asegurate de desplegar la Edge Function "checkout".'
-        );
+      const result = await startCheckout();
+      if (!result.ok) {
+        setCheckoutError(result.message);
         return;
       }
-      await Linking.openURL(url);
+      await Linking.openURL(result.url);
     } catch {
       setCheckoutError('No se pudo abrir el navegador de pago.');
     } finally {
@@ -228,19 +328,28 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
     }
   };
 
-  const handleDeleteAccount = async () => {
-    if (deleting) return;
-    setDeleting(true);
+  const handleVerify = async () => {
+    if (checkoutBusy) return;
+    setCheckoutBusy(true);
+    setCheckoutError(null);
     try {
-      await deleteAccount();
-      if (userId) await deleteLocalUserData(userId);
-      await signOut();
+      const res = await verifySubscription();
+      await refreshRole();
+      if (res.ok && res.role === 'pro') {
+        Alert.alert(
+          '¡Suscripción Pro Activa!',
+          'Se confirmó tu suscripción en Stripe. Ya podés disfrutar de los beneficios Pro.'
+        );
+      } else {
+        Alert.alert(
+          'Estado de suscripción',
+          res.message || 'No se detectó un pago completado reciente en Stripe.'
+        );
+      }
     } catch {
-      setDeleting(false);
-      Alert.alert(
-        'Error',
-        'No se pudo eliminar la cuenta. Revisá la configuración de la Edge Function.'
-      );
+      setCheckoutError('No se pudo verificar la suscripción.');
+    } finally {
+      setCheckoutBusy(false);
     }
   };
 
@@ -348,10 +457,13 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
 
         <View className="flex-row items-center justify-center gap-3">
           <Pressable
-            onPress={toggleFocus}
+            onPress={() => void toggleFocus()}
+            disabled={focusBusy}
             className="flex-1 flex-row items-center justify-center gap-2 py-3 px-6 rounded-full bg-[#2563eb] shadow-md"
           >
-            {isActive ? (
+            {focusBusy ? (
+              <Text className="text-sm font-sans-bold text-white">Preparando aviso...</Text>
+            ) : isActive ? (
               <>
                 <Pause size={16} color="#ffffff" fill="#ffffff" />
                 <Text className="text-sm font-sans-bold text-white">Pausar Sesión</Text>
@@ -566,37 +678,19 @@ export const DashboardTab: React.FC<Props> = ({ sensors, decibels, noiseStatus, 
                 {checkoutBusy ? 'Abriendo pago...' : 'Mejorar a Pro'}
               </Text>
             </Pressable>
+            <Pressable
+              onPress={() => void handleVerify()}
+              disabled={checkoutBusy}
+              className="mt-3 py-2 items-center"
+            >
+              <Text className="text-xs font-sans-semibold text-[#2563eb]">
+                ¿Ya pagaste? Toca acá para verificar tu suscripción
+              </Text>
+            </Pressable>
           </>
         )}
       </View>
 
-      {/* Account */}
-      <View className="bg-white rounded-2xl p-6 border border-slate-200/80">
-        <Text className="text-base font-sans-bold text-[#131b2e] mb-1">Mi cuenta</Text>
-        <Text className="text-xs font-sans text-[#434655] mb-4">
-          {session?.user.email ?? 'Usuario local'}. Al eliminar la cuenta se borran todos tus
-          registros de la base de datos.
-        </Text>
-        <Pressable
-          onPress={() => {
-            Alert.alert(
-              'Eliminar cuenta',
-              '¿Seguro que querés eliminar tu cuenta y todos tus datos? Esta acción no se puede deshacer.',
-              [
-                { text: 'Cancelar', style: 'cancel' },
-                { text: 'Eliminar', style: 'destructive', onPress: () => void handleDeleteAccount() },
-              ]
-            );
-          }}
-          disabled={deleting}
-          className="flex-row items-center justify-center gap-2 px-5 py-3 rounded-full border border-rose-200 bg-rose-50"
-        >
-          <Trash2 size={16} color="#dc2626" />
-          <Text className="text-sm font-sans-bold text-rose-700">
-            {deleting ? 'Eliminando...' : 'Eliminar cuenta y datos'}
-          </Text>
-        </Pressable>
-      </View>
     </View>
   );
 };

@@ -14,20 +14,35 @@ export type Database = {
     Tables: {
       profiles: {
         Row: {
+          deleted_at: string | null;
           role: 'free' | 'pro';
+          stripe_subscription_id: string | null;
           stripe_customer_id: string | null;
+          subscription_cancel_at_period_end: boolean;
+          subscription_current_period_end: string | null;
+          subscription_status: string | null;
           updated_at: string;
           user_id: string;
         };
         Insert: {
+          deleted_at?: string | null;
           role?: 'free' | 'pro';
+          stripe_subscription_id?: string | null;
           stripe_customer_id?: string | null;
+          subscription_cancel_at_period_end?: boolean;
+          subscription_current_period_end?: string | null;
+          subscription_status?: string | null;
           updated_at?: string;
           user_id: string;
         };
         Update: {
+          deleted_at?: string | null;
           role?: 'free' | 'pro';
+          stripe_subscription_id?: string | null;
           stripe_customer_id?: string | null;
+          subscription_cancel_at_period_end?: boolean;
+          subscription_current_period_end?: string | null;
+          subscription_status?: string | null;
           updated_at?: string;
           user_id?: string;
         };
